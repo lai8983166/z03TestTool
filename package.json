@@ -1,0 +1,12 @@
+{
+  "name": "z03testtool",
+  "version": "1.0.0",
+  "description": "Z03 test tool",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^34.5.8"
+  }
+}
