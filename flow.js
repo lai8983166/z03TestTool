@@ -1,4 +1,6 @@
 const fs = require('fs')
+const path = require('path')
+const ExcelJS = require('exceljs')
 
 /**
  * 工具函数工厂 —— 流程函数里通过 h.xxx 调用，一般不需要改这里。
@@ -47,6 +49,12 @@ function makeHelpers({ exec, log, signal }) {
       if (r === 'MISSING_CELL') throw new Error(`单元格不存在: ${tableId} 第${row}行第${col}列`)
       return r
     },
+    getText: async (id) => {
+      checkAborted()
+      const r = await exec(`(() => { const el = document.getElementById(${validId(id)}); return el ? el.textContent.trim() : 'MISSING' })()`)
+      if (r === 'MISSING') throw new Error(`元素不存在: ${id}`)
+      return r
+    },
     wait: async (ms, silent = false) => {
       checkAborted()
       if (!silent) log(`... 等待 ${ms}ms`)
@@ -72,6 +80,132 @@ function makeHelpers({ exec, log, signal }) {
       }
     }
   }
+}
+
+/**
+ * 搜索能力流程（六个波位共用）—— 规则见 openspec/changes/add-search-capability-flows
+ */
+const DATA_DIR = 'D:/projects/7-31/dist/app/data'
+
+// 点检测：返回锚帧（"下一帧"/翻转帧）索引数组
+function detectPoints(angles, cfg) {
+  const anchors = []
+  if (cfg.rule === 'signFlip') {
+    for (let i = 1; i < angles.length; i++) {
+      if (angles[i - 1] > 0 && angles[i] < 0) anchors.push(i)
+    }
+    return anchors
+  }
+  let run = 0
+  for (let i = 0; i < angles.length; i++) {
+    const v = angles[i]
+    if (Number.isFinite(v) && v >= cfg.lo && v <= cfg.hi) { run++; continue }
+    if (run >= cfg.n && Number.isFinite(v) && Math.round(v) === cfg.target) anchors.push(i)
+    run = 0
+  }
+  return anchors
+}
+
+// 读取本次保存的 AB帧 xlsx 的「B帧」工作表 → { times[], angles[] }
+async function readBFrameSheet(h, t0, dir, channel) {
+  const deadline = Date.now() + 15000
+  let file = null
+  for (;;) {
+    try {
+      const files = fs.readdirSync(dir).filter(f => /^数据采集AB帧_.*\.xlsx$/.test(f))
+      let newest = null, newestM = 0
+      for (const f of files) {
+        const st = fs.statSync(path.join(dir, f))
+        if (st.mtimeMs > t0 && st.mtimeMs > newestM) { newest = path.join(dir, f); newestM = st.mtimeMs }
+      }
+      if (newest) {
+        const s1 = fs.statSync(newest).size
+        await h.wait(500, true)
+        if (s1 > 0 && s1 === fs.statSync(newest).size) { file = newest; break }
+      }
+    } catch { /* 目录尚未就绪，继续等 */ }
+    if (Date.now() > deadline) throw new Error('搜索测试失败：未找到本次保存的数据采集AB帧_*.xlsx')
+    await h.wait(500, true)
+  }
+  h.log(`📄 读取 ${path.basename(file)}（B帧）`)
+  const wb = new ExcelJS.Workbook()
+  await wb.xlsx.readFile(file)
+  const ws = wb.getWorksheet('B帧')
+  if (!ws) throw new Error('搜索测试失败：xlsx 中没有「B帧」工作表')
+
+  // row.values 是稀疏数组（空单元格为洞），用 Array.from 补齐
+  const header = Array.from(ws.getRow(1).values || [], v => String(v ?? ''))
+  const timeCol = header.findIndex(txt => txt.includes('时间'))
+  const angleCol = header.findIndex(txt => txt.includes(`光轴指向${channel}`))
+  if (angleCol === -1) throw new Error(`搜索测试失败：表头未找到「光轴指向${channel}」列，实际表头: ${header.filter(Boolean).join(' | ')}`)
+  h.log(`... 解析 ${ws.rowCount - 1} 行（时间列${timeCol}，角度列${angleCol}${timeCol === -1 ? '，时间列未识别改用第1列' : ''}）`)
+
+  const times = [], angles = []
+  let skipped = 0
+  for (let r = 2; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r)
+    const tVal = row.getCell(timeCol === -1 ? 1 : timeCol).value
+    const aVal = parseFloat(String(row.getCell(angleCol).text ?? row.getCell(angleCol).value ?? ''))
+    const t = tVal instanceof Date ? tVal.getTime() : Date.parse(String(tVal))
+    if (Number.isFinite(t) && Number.isFinite(aVal)) { times.push(t); angles.push(aVal) }
+    else skipped++
+  }
+  if (skipped) h.log(`⚠ 跳过无法解析的帧 ${skipped} 行`, 'warn')
+  if (!angles.length) throw new Error('搜索测试失败：B帧数据为空或角度全部无法解析，请检查设备数据流')
+  return { times, angles }
+}
+
+// 搜索流程主体
+async function runSearchFlow(h, cfg, dataDir = DATA_DIR) {
+  const NEED = 21
+  const t0 = Date.now()
+  h.log(`▶ 搜索流程【${cfg.name}】搜索指令=${cfg.sszl}`)
+  await h.setInput('comboBox_SSZL', cfg.sszl)      // 搜索指令（发送前设置，A帧为启动时快照）
+  await h.setInput('comboBox_HWJHKZ', true)        // 允许截获
+  await h.click('pushButton_SJCJ_F000H_Send')      // 开始数据采集
+  await h.click('pushButton_SJCJ_0010H')           // 开始保存A/B帧
+
+  try {
+    for (let s = 4; s >= 1; s--) {
+      await h.wait(1000, true)
+      h.log(`... 录制中，剩余 ${s}s`)
+    }
+    await h.wait(1000, true)
+    h.log('... 录制结束（5s），停止保存与采集')
+  } finally {
+    for (const [id, label] of [['pushButton_SJCJ_0010H', '保存'], ['pushButton_SJCJ_F000H_Send', '采集']]) {
+      try {
+        if ((await h.getText(id)).includes('停止')) await h.click(id)
+        else h.log(`⚠ ${label}开关未处于开启状态`)
+      } catch (e) { h.log(`⚠ 停止${label}失败: ${e.message}`, 'warn') }
+    }
+  }
+
+  const { times, angles } = await readBFrameSheet(h, t0, dataDir, cfg.channel)
+  const anchors = detectPoints(angles, cfg)
+  h.log(`... 检测到 ${anchors.length} 个点（总帧数 ${angles.length}）`)
+  if (anchors.length < NEED) {
+    throw new Error(`搜索测试失败：【${cfg.name}】仅找到 ${anchors.length}/${NEED} 个点（总帧数 ${angles.length}）`)
+  }
+
+  const used = anchors.slice(0, NEED)
+  const avgMs = (times[used[NEED - 1]] - times[used[0]]) / 5
+  const seg = angles.slice(used[0], used[NEED - 1] + 1)
+  const range = Math.max(...seg) - Math.min(...seg)
+  used.forEach((idx, i) => h.log(`点${i + 1}: 帧${idx + 1} ${cfg.channel}=${angles[idx].toFixed(3)}°`))
+  h.log(`📊 平均时间 = ${avgMs.toFixed(1)}ms，范围 = ${range.toFixed(3)}°`)
+  h.log(`✅ ${cfg.name}搜索测试完成`)
+  return { avgMs, range }
+}
+
+// 六个波位的规则配置
+const SEARCH_CONFIGS = {
+  '搜索能力 - 九波位':      { name: '九波位', sszl: '001b九位波搜索', channel: '方位角', n: 8, lo: -0.3, hi: 0.3, target: 2 },
+  '搜索能力 - 十六波位':    { name: '十六波位', sszl: '010b十六位波搜索', channel: '方位角', n: 8, lo: -0.3, hi: 0.3, target: 2 },
+  '搜索能力 - 俯仰向三波位': { name: '俯仰向三波位', sszl: '011b俯仰向三波位搜索', channel: '俯仰角', n: 5, lo: -0.5, hi: 0.5, target: -2 },
+  '搜索能力 - 方位向三波位': { name: '方位向三波位', sszl: '100b方位向三波位搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, target: -3 },
+  '搜索能力 - 五波位':      { name: '五波位', sszl: '101b五波位搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, target: -1 },
+  '搜索能力 - 四波位':      { name: '四波位', sszl: '110b四波位搜索', channel: '方位角', rule: 'signFlip' }
 }
 
 /**
@@ -189,24 +323,12 @@ const flows = {
     }
   },
 
-  '搜索能力 - 九波位': async (h) => {
-    h.log('TODO: 搜索能力（九波位）步骤待定义')
-  },
-  '搜索能力 - 十六波位': async (h) => {
-    h.log('TODO: 搜索能力（十六波位）步骤待定义')
-  },
-  '搜索能力 - 俯仰向三波位': async (h) => {
-    h.log('TODO: 搜索能力（俯仰向三波位）步骤待定义')
-  },
-  '搜索能力 - 方位向三波位': async (h) => {
-    h.log('TODO: 搜索能力（方位向三波位）步骤待定义')
-  },
-  '搜索能力 - 五波位': async (h) => {
-    h.log('TODO: 搜索能力（五波位）步骤待定义')
-  },
-  '搜索能力 - 四波位': async (h) => {
-    h.log('TODO: 搜索能力（四波位）步骤待定义')
-  },
+  '搜索能力 - 九波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 九波位']),
+  '搜索能力 - 十六波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 十六波位']),
+  '搜索能力 - 俯仰向三波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 俯仰向三波位']),
+  '搜索能力 - 方位向三波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 方位向三波位']),
+  '搜索能力 - 五波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 五波位']),
+  '搜索能力 - 四波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 四波位']),
   '最小搜索范围': async (h) => {
     h.log('TODO: 最小搜索范围流程步骤待定义')
   },
@@ -215,4 +337,4 @@ const flows = {
   }
 }
 
-module.exports = { sidebar, flows, makeHelpers }
+module.exports = { sidebar, flows, makeHelpers, SEARCH_CONFIGS, detectPoints, runSearchFlow }
