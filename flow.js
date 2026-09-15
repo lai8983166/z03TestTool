@@ -62,23 +62,51 @@ function makeHelpers({ exec, log, signal }) {
 }
 
 /**
- * 流程定义 —— 一个键 = 左侧面板一个按钮，值为该流程的执行函数。
- * 添加新流程：照着下面的样子加一个键值对即可。
+ * 左侧面板结构（从上到下）—— type: button 点击即运行 / select 选中某选项即运行对应流程
+ */
+const sidebar = [
+  { type: 'button', label: '自检' },
+  { type: 'button', label: '唤醒' },
+  { type: 'select', label: '搜索能力', options: ['九波位', '十六波位', '俯仰向三波位', '方位向三波位', '五波位', '四波位'] },
+  { type: 'button', label: '最小搜索范围' },
+  { type: 'button', label: '光轴预置范围' }
+]
+
+/**
+ * 流程定义 —— 键名与左侧面板条目对应；下拉框流程键名为「标签 - 选项」。
+ * 各流程具体步骤待补充，现在为占位。
  */
 const flows = {
-  '演示流程': async (h) => {
-    await h.wait(500)
-    await h.click('pushButton_End_Save') // 演示：未录制时点击「停止保存」为空操作，无副作用
-    await h.wait(1000)
-    await h.readFile('D:/projects/7-31/dist/app/config.json')
+  '自检': async (h) => {
+    h.log('TODO: 自检流程步骤待定义')
+  },
+  '唤醒': async (h) => {
+    h.log('TODO: 唤醒流程步骤待定义')
+  },
+  '搜索能力 - 九波位': async (h) => {
+    h.log('TODO: 搜索能力（九波位）步骤待定义')
+  },
+  '搜索能力 - 十六波位': async (h) => {
+    h.log('TODO: 搜索能力（十六波位）步骤待定义')
+  },
+  '搜索能力 - 俯仰向三波位': async (h) => {
+    h.log('TODO: 搜索能力（俯仰向三波位）步骤待定义')
+  },
+  '搜索能力 - 方位向三波位': async (h) => {
+    h.log('TODO: 搜索能力（方位向三波位）步骤待定义')
+  },
+  '搜索能力 - 五波位': async (h) => {
+    h.log('TODO: 搜索能力（五波位）步骤待定义')
+  },
+  '搜索能力 - 四波位': async (h) => {
+    h.log('TODO: 搜索能力（四波位）步骤待定义')
+  },
+  '最小搜索范围': async (h) => {
+    h.log('TODO: 最小搜索范围流程步骤待定义')
+  },
+  '光轴预置范围': async (h) => {
+    h.log('TODO: 光轴预置范围流程步骤待定义')
   }
-
-  // '流程名称': async (h) => {
-  //   await h.click('按钮id')
-  //   await h.wait(2000)
-  //   await h.waitForFile('D:/xxx/输出文件.dat')
-  //   await h.readFile('D:/xxx/输出文件.dat')
-  // },
 }
 
-module.exports = { flows, makeHelpers }
+module.exports = { sidebar, flows, makeHelpers }

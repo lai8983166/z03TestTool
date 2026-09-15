@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain } = require('electron')
 const path = require('path')
-const { flows, makeHelpers } = require('./flow')
+const { sidebar, flows, makeHelpers } = require('./flow')
 
 const PAGE_URL = 'http://localhost:8080'
 
@@ -117,7 +117,7 @@ ipcMain.handle('flow:stop', () => {
 ipcMain.handle('flow:getState', () => ({
   running,
   currentFlow,
-  flows: Object.keys(flows)
+  sidebar
 }))
 
 app.whenReady().then(() => {
