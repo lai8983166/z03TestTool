@@ -96,6 +96,7 @@ function makeHelpers({ exec, log, signal }) {
 /**
  * 搜索能力流程（六个波位共用）—— 规则见 openspec/changes/add-search-capability-flows
  */
+// ===== 部署配置：上位机服务数据目录（上位机服务部署位置变化时修改此处） =====
 const DATA_DIR = 'D:/projects/7-31/dist/app/data'
 
 // 点检测：返回锚帧（"下一帧"/翻转帧）索引数组
@@ -225,7 +226,7 @@ const angDiff = (a, b) => Math.abs((((a - b) % 360) + 540) % 360 - 180)
 
 async function assertTurntableReady(h) {
   const s = await h.getText('tt_serial_status')
-  if (!s.includes('已连接')) throw new Error(`转台串口未连接（${s}），请先在 7-31 页面连接转台串口`)
+  if (!s.includes('已连接')) throw new Error(`转台串口未连接（${s}），请先在上位机页面连接转台串口`)
 }
 
 // 到位 = 两轴速度为 0 且反馈位置进目标 ±容差（考虑 ±360° 环绕）

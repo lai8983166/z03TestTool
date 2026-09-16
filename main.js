@@ -43,7 +43,7 @@ function createPanel() {
   panelWin.on('closed', () => { panelWin = null })
 }
 
-// 隐藏的 7-31 页面窗口；did-finish-load 完成前不执行任何点击
+// 隐藏的上位机页面窗口；did-finish-load 完成前不执行任何点击
 function ensurePage() {
   if (pageWin && !pageWin.isDestroyed() && pageLoaded) return pageLoaded
   pageWin = new BrowserWindow({
@@ -56,7 +56,7 @@ function ensurePage() {
   })
   pageLoaded = new Promise((resolve, reject) => {
     pageWin.webContents.on('did-finish-load', () => {
-      log('7-31 页面加载完成')
+      log('上位机页面加载完成')
       resolve()
     })
     pageWin.webContents.on('did-fail-load', (_e, code, desc) => {
@@ -85,14 +85,14 @@ ipcMain.handle('flow:run', async (_e, name) => {
   sendStatus('running')
   try {
     log(`▶ 开始流程【${name}】`)
-    log('检查 7-31 服务...')
+    log('检查上位机服务...')
     try {
       const res = await fetch(PAGE_URL, { signal })
       if (res.status >= 500) throw new Error(`HTTP ${res.status}`)
-      log('7-31 服务在线')
+      log('上位机服务在线')
     } catch (e) {
       if (signal.aborted) throw new Error('已中止')
-      throw new Error(`7-31 服务离线，请先手动运行 start.bat（${e.message}）`)
+      throw new Error(`上位机服务离线，请先手动运行 start.bat（${e.message}）`)
     }
 
     await flow(makeHelpers({ exec, log, signal }))
