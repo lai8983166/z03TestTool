@@ -24,11 +24,11 @@ function makeHelpers({ exec, log, signal }) {
 
   return {
     log,
-    click: async (id) => {
-      checkAborted()
+    click: async (id, { force = false } = {}) => {
+      if (!force) checkAborted()
       const r = await exec(`(() => { const el = document.getElementById(${validId(id)}); if (!el) return 'MISSING'; el.click(); return 'ok' })()`)
       if (r !== 'ok') throw new Error(`按钮不存在: ${id}`)
-      log(`✔ 点击 ${id}`)
+      log(`✔ 点击 ${id}${force ? '（清理）' : ''}`)
     },
     setInput: async (id, value) => {
       checkAborted()
@@ -49,11 +49,22 @@ function makeHelpers({ exec, log, signal }) {
       if (r === 'MISSING_CELL') throw new Error(`单元格不存在: ${tableId} 第${row}行第${col}列`)
       return r
     },
-    getText: async (id) => {
-      checkAborted()
+    getText: async (id, { force = false } = {}) => {
+      if (!force) checkAborted()
       const r = await exec(`(() => { const el = document.getElementById(${validId(id)}); return el ? el.textContent.trim() : 'MISSING' })()`)
       if (r === 'MISSING') throw new Error(`元素不存在: ${id}`)
       return r
+    },
+    setCellText: async (tableId, row, col, value) => {
+      checkAborted()
+      if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || col < 0) {
+        throw new Error(`非法行列号: ${row}, ${col}`)
+      }
+      const v = JSON.stringify(String(value))
+      const r = await exec(`(() => { const tb = document.getElementById(${validId(tableId)}); if (!tb) return 'MISSING_TABLE'; const tr = tb.rows[${row}]; const cell = tr && tr.cells[${col}]; if (!cell) return 'MISSING_CELL'; cell.textContent = ${v}; return 'ok' })()`)
+      if (r === 'MISSING_TABLE') throw new Error(`表格不存在: ${tableId}`)
+      if (r === 'MISSING_CELL') throw new Error(`单元格不存在: ${tableId} 第${row}行第${col}列`)
+      log(`✔ 设置 ${tableId}[${row}][${col}] = ${value}`)
     },
     wait: async (ms, silent = false) => {
       checkAborted()
@@ -173,12 +184,7 @@ async function runSearchFlow(h, cfg, dataDir = DATA_DIR) {
     await h.wait(1000, true)
     h.log('... 录制结束（5s），停止保存与采集')
   } finally {
-    for (const [id, label] of [['pushButton_SJCJ_0010H', '保存'], ['pushButton_SJCJ_F000H_Send', '采集']]) {
-      try {
-        if ((await h.getText(id)).includes('停止')) await h.click(id)
-        else h.log(`⚠ ${label}开关未处于开启状态`)
-      } catch (e) { h.log(`⚠ 停止${label}失败: ${e.message}`, 'warn') }
-    }
+    await stopAcquisitionAndSave(h, { force: true })
   }
 
   const { times, angles } = await readBFrameSheet(h, t0, dataDir, cfg.channel)
@@ -206,6 +212,71 @@ const SEARCH_CONFIGS = {
   '搜索能力 - 方位向三波位': { name: '方位向三波位', sszl: '100b方位向三波位搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, target: -3 },
   '搜索能力 - 五波位':      { name: '五波位', sszl: '101b五波位搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, target: -1 },
   '搜索能力 - 四波位':      { name: '四波位', sszl: '110b四波位搜索', channel: '方位角', rule: 'signFlip' }
+}
+
+/**
+ * 转台扫描流程（最小搜索范围 / 光轴预置范围）—— 规则见 openspec/changes/add-turntable-scan-flows
+ */
+const POSITIONS = [[0, -45], [-15, -40], [22, -30], [-23, -20], [21, -10], [-18, 0], [10, 10], [0, 15]] // [俯仰, 方位]
+const ARRIVE_TOL = 0.5      // 到位位置容差（度）
+const ARRIVE_TIMEOUT = 60000 // 单点到位超时（ms）
+const fmtN = (v) => (Number.isFinite(v) ? v.toFixed(3) : 'N/A')
+const angDiff = (a, b) => Math.abs((((a - b) % 360) + 540) % 360 - 180)
+
+async function assertTurntableReady(h) {
+  const s = await h.getText('tt_serial_status')
+  if (!s.includes('已连接')) throw new Error(`转台串口未连接（${s}），请先在 7-31 页面连接转台串口`)
+}
+
+// 到位 = 两轴速度为 0 且反馈位置进目标 ±容差（考虑 ±360° 环绕）
+async function waitTurntableArrive(h, pitch, az, timeoutMs = ARRIVE_TIMEOUT, pollMs = 200) {
+  const t0 = Date.now()
+  for (;;) {
+    await h.click('tt_btn_status')
+    await h.wait(pollMs, true)
+    const vAz = parseFloat(await h.getText('tt_td_inner_vel'))
+    const vPitch = parseFloat(await h.getText('tt_td_outer_vel'))
+    const pAz = parseFloat(await h.getText('tt_td_inner_pos'))
+    const pPitch = parseFloat(await h.getText('tt_td_outer_pos'))
+    const stopped = [vAz, vPitch].every(v => Number.isFinite(v) && Math.abs(v) < 0.0001)
+    const posOk = angDiff(pAz, az) <= ARRIVE_TOL && angDiff(pPitch, pitch) <= ARRIVE_TOL
+    if (stopped && posOk) {
+      h.log(`✔ 到位：俯仰=${fmtN(pPitch)}° 方位=${fmtN(pAz)}°`)
+      return
+    }
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(`转台到位超时：目标(俯仰=${pitch},方位=${az})，反馈(俯仰=${fmtN(pPitch)},方位=${fmtN(pAz)})，速度(${fmtN(vPitch)},${fmtN(vAz)})`)
+    }
+  }
+}
+
+// 8 点位扫描；onArrived(pitch, az, index) 在每点到位后、停留前调用
+async function scanPositions(h, onArrived, dwellMs = 5000) {
+  for (let i = 0; i < POSITIONS.length; i++) {
+    const [pitch, az] = POSITIONS[i]
+    h.log(`▶ 点位 ${i + 1}/${POSITIONS.length}：俯仰=${pitch}° 方位=${az}°`)
+    await h.setInput('tt_input_inner_pos', az)   // 内环=方位
+    await h.setInput('tt_input_outer_pos', pitch) // 外环=俯仰
+    await h.click('tt_btn_set_pos')
+    await h.click('tt_btn_run')
+    await waitTurntableArrive(h, pitch, az)
+    if (onArrived) await onArrived(pitch, az, i)
+    for (let s = Math.round(dwellMs / 1000) - 1; s >= 1; s--) {
+      await h.wait(1000, true)
+      h.log(`... 停留中，本点剩余 ${s}s`)
+    }
+    await h.wait(dwellMs % 1000 || 1000, true)
+  }
+  h.log(`✔ ${POSITIONS.length} 个点位扫描完成`)
+}
+
+// 收尾清理：停采集、停保存（force=中止后仍执行）
+async function stopAcquisitionAndSave(h, { force = false } = {}) {
+  for (const [id, label] of [['pushButton_SJCJ_F000H_Send', '采集'], ['pushButton_SJCJ_0010H', '保存']]) {
+    try {
+      if ((await h.getText(id, { force })).includes('停止')) await h.click(id, { force })
+    } catch (e) { h.log(`⚠ 停止${label}失败: ${e.message}`, 'warn') }
+  }
 }
 
 /**
@@ -329,12 +400,57 @@ const flows = {
   '搜索能力 - 方位向三波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 方位向三波位']),
   '搜索能力 - 五波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 五波位']),
   '搜索能力 - 四波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 四波位']),
+  /**
+   * 最小搜索范围（最小跟踪视场测试）：勾截获→采集→保存B帧→5s→8点位扫描→
+   * 取消截获+发清除帧→停止采集/保存
+   */
   '最小搜索范围': async (h) => {
-    h.log('TODO: 最小搜索范围流程步骤待定义')
+    h.log('▶ 流程【最小搜索范围】（最小跟踪视场测试）')
+    await assertTurntableReady(h)
+    await h.setInput('comboBox_HWJHKZ', true)
+    await h.click('pushButton_SJCJ_F000H_Send')
+    await h.click('pushButton_SJCJ_0010H')
+    try {
+      await h.wait(5000, true)
+      h.log('... 预录 5s 结束，开始点位扫描')
+      await scanPositions(h)
+      h.log('... 取消允许截获并发清除帧')
+      await h.setInput('comboBox_HWJHKZ', false)
+      await h.click('pushButton_SJCJ_F000H_update')
+    } finally {
+      await h.click('tt_btn_stop', { force: true })
+      await stopAcquisitionAndSave(h, { force: true })
+    }
+    h.log('✅ 最小搜索范围流程完成')
   },
+
+  /**
+   * 光轴预置范围：勾选地面预置→采集→保存B帧→5s→8点位扫描（每点到位后
+   * 预置俯仰/方位角设为该点角度并更新A帧发出）→取消预置+发清除帧→停止
+   */
   '光轴预置范围': async (h) => {
-    h.log('TODO: 光轴预置范围流程步骤待定义')
+    h.log('▶ 流程【光轴预置范围】')
+    await assertTurntableReady(h)
+    await h.setInput('comboBox_YZCSZL', true)      // 地面预置测试状态
+    await h.click('pushButton_SJCJ_F000H_Send')
+    await h.click('pushButton_SJCJ_0010H')
+    try {
+      await h.wait(5000, true)
+      h.log('... 预录 5s 结束，开始点位扫描')
+      await scanPositions(h, async (pitch, az) => {
+        await h.setCellText('tableWidget_SJCJ_F000H_Send', 25, 1, pitch.toFixed(1))
+        await h.setCellText('tableWidget_SJCJ_F000H_Send', 26, 1, az.toFixed(1))
+        await h.click('pushButton_SJCJ_F000H_update')  // 更新A帧发出预置
+      })
+      h.log('... 取消地面预置并发清除帧')
+      await h.setInput('comboBox_YZCSZL', false)
+      await h.click('pushButton_SJCJ_F000H_update')
+    } finally {
+      await h.click('tt_btn_stop', { force: true })
+      await stopAcquisitionAndSave(h, { force: true })
+    }
+    h.log('✅ 光轴预置范围流程完成')
   }
 }
 
-module.exports = { sidebar, flows, makeHelpers, SEARCH_CONFIGS, detectPoints, runSearchFlow }
+module.exports = { sidebar, flows, makeHelpers, SEARCH_CONFIGS, detectPoints, runSearchFlow, POSITIONS }
