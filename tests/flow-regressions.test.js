@@ -13,7 +13,10 @@ const {
   stopAcquisitionAndSave,
   normalizeTurntableBasePosition,
   SEARCH_CONFIGS,
-  detectPoints
+  detectPoints,
+  analyzeFrameFrequency,
+  readFrameFrequencySheet,
+  runFrameRateFlow
 } = require('../flow')
 
 test('nine- and sixteen-position points require the immediate next frame to rise above 1', () => {
@@ -23,6 +26,39 @@ test('nine- and sixteen-position points require the immediate next frame to rise
     assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 1.01], cfg), [5], key)
     assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 1], cfg), [], key)
     assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 0.9, 1.2], cfg), [], `${key} must use the immediate next frame`)
+  }
+})
+
+test('frame-frequency analysis requires 1000 records with adjacent frame-number difference 2', () => {
+  const sequence = Array.from({ length: 1000 }, (_, index) => 100 + index * 2)
+  assert.deepEqual(analyzeFrameFrequency(sequence), {
+    validCount: 1000,
+    longestRun: 1000,
+    required: 1000,
+    step: 2,
+    success: true
+  })
+
+  const broken = analyzeFrameFrequency([0, 2, 4, 10, 12, 14, Number.NaN, 20, 22])
+  assert.equal(broken.validCount, 8)
+  assert.equal(broken.longestRun, 3)
+  assert.equal(broken.success, false)
+})
+
+test('frame-frequency reader rejects a B-frame sheet without the infrared image frame number field', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'z03-frame-rate-header-'))
+  try {
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('B帧')
+    sheet.addRow(['时间', '其他字段'])
+    sheet.addRow([new Date().toISOString(), 1])
+    await workbook.xlsx.writeFile(path.join(tempDir, '数据采集AB帧_missing.xlsx'))
+    await assert.rejects(
+      readFrameFrequencySheet({ wait: async () => {}, log: () => {} }, Date.now() - 1000, tempDir),
+      /未找到「红外图像帧号」列/
+    )
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true })
   }
 })
 
@@ -143,7 +179,7 @@ test('search resets stale toggle states and records for 15 seconds', async () =>
         const sheet = workbook.addWorksheet('B帧')
         sheet.addRow(['时间', '光轴指向方位角'])
         const base = Date.now()
-        for (let i = 0; i < 21; i++) {
+        for (let i = 0; i < 5; i++) {
           sheet.addRow([new Date(base + i * 200).toISOString(), 1])
           sheet.addRow([new Date(base + i * 200 + 100).toISOString(), -1])
         }
@@ -176,6 +212,91 @@ test('search resets stale toggle states and records for 15 seconds', async () =>
     assert.deepEqual(actions.filter((action) => action.startsWith('click:')), [
       'click:pushButton_SJCJ_0010H',
       'click:pushButton_SJCJ_F000H_Send',
+      'click:pushButton_SJCJ_F000H_Send',
+      'click:pushButton_SJCJ_0010H',
+      'click:pushButton_SJCJ_F000H_update',
+      'click:pushButton_SJCJ_0010H',
+      'click:pushButton_SJCJ_F000H_Send'
+    ])
+    const finalUpdate = actions.indexOf('click:pushButton_SJCJ_F000H_update')
+    const finalSaveStop = actions.lastIndexOf('click:pushButton_SJCJ_0010H')
+    assert.ok(actions.indexOf('set:comboBox_HWJHKZ=false') < finalUpdate)
+    assert.ok(actions.indexOf('set:comboBox_YZCSZL=true') < finalUpdate)
+    assert.ok(finalUpdate < finalSaveStop)
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true })
+  }
+})
+
+test('search startup failure still cleans up an A-frame sender that already started', async () => {
+  const actions = []
+  const buttonText = new Map([
+    ['pushButton_SJCJ_F000H_Send', '开始数据采集'],
+    ['pushButton_SJCJ_0010H', '开始保存A/B帧']
+  ])
+  const h = {
+    setInput: async () => {},
+    wait: async () => {},
+    waitCleanup: async () => {},
+    log: () => {},
+    getText: async (id) => buttonText.get(id),
+    click: async (id) => {
+      actions.push(`click:${id}`)
+      if (id === 'pushButton_SJCJ_F000H_Send') {
+        buttonText.set(id, buttonText.get(id).includes('停止') ? '开始数据采集' : '停止数据采集')
+      }
+      if (id === 'pushButton_SJCJ_0010H') throw new Error('模拟保存启动失败')
+    }
+  }
+
+  await assert.rejects(
+    runSearchFlow(h, { name: '启动失败测试', sszl: '001b九位波搜索', channel: '方位角', rule: 'signFlip' }, os.tmpdir()),
+    /模拟保存启动失败/
+  )
+  assert.deepEqual(actions.filter((action) => action === 'click:pushButton_SJCJ_F000H_Send'), [
+    'click:pushButton_SJCJ_F000H_Send',
+    'click:pushButton_SJCJ_F000H_Send'
+  ])
+})
+
+test('frame-rate flow records for 15 seconds and succeeds on 1000 adjacent frame numbers', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'z03-frame-rate-'))
+  const actions = []
+  const waits = []
+  const buttonText = new Map([
+    ['pushButton_SJCJ_F000H_Send', '开始数据采集'],
+    ['pushButton_SJCJ_0010H', '开始保存A/B帧']
+  ])
+
+  const h = {
+    log: () => {},
+    wait: async (ms) => waits.push(ms),
+    click: async (id) => {
+      actions.push(`click:${id}`)
+      if (id === 'pushButton_SJCJ_F000H_Send') {
+        buttonText.set(id, buttonText.get(id).includes('停止') ? '开始数据采集' : '停止数据采集')
+      }
+      if (id === 'pushButton_SJCJ_0010H') {
+        const stopping = buttonText.get(id).includes('停止')
+        buttonText.set(id, stopping ? '开始保存A/B帧' : '停止保存A/B帧')
+        if (stopping) {
+          const workbook = new ExcelJS.Workbook()
+          const sheet = workbook.addWorksheet('B帧')
+          sheet.addRow(['时间', '红外图像帧号'])
+          for (let i = 0; i < 1000; i++) sheet.addRow([new Date().toISOString(), 500 + i * 2])
+          await workbook.xlsx.writeFile(path.join(tempDir, '数据采集AB帧_frame-rate.xlsx'))
+        }
+      }
+    },
+    getText: async (id) => buttonText.get(id)
+  }
+
+  try {
+    const result = await runFrameRateFlow(h, tempDir)
+    assert.equal(result.success, true)
+    assert.equal(result.longestRun, 1000)
+    assert.equal(waits.filter((ms) => ms === 1000).length, 15)
+    assert.deepEqual(actions.filter((action) => action.startsWith('click:')), [
       'click:pushButton_SJCJ_F000H_Send',
       'click:pushButton_SJCJ_0010H',
       'click:pushButton_SJCJ_0010H',

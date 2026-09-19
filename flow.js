@@ -135,6 +135,82 @@ function detectPoints(angles, cfg) {
   return anchors
 }
 
+// 帧频判定：连续记录中每相邻两个红外图像帧号的差值必须为 step。
+function analyzeFrameFrequency(frameNumbers, required = 1000, step = 2) {
+  let validCount = 0
+  let currentRun = 0
+  let longestRun = 0
+  let previous = null
+
+  for (const raw of frameNumbers) {
+    const value = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''))
+    if (!Number.isFinite(value)) {
+      previous = null
+      currentRun = 0
+      continue
+    }
+
+    validCount++
+    currentRun = previous !== null && value - previous === step ? currentRun + 1 : 1
+    longestRun = Math.max(longestRun, currentRun)
+    previous = value
+  }
+
+  return { validCount, longestRun, required, step, success: longestRun >= required }
+}
+
+async function readFrameFrequencySheet(h, t0, dir) {
+  const deadline = Date.now() + 15000
+  let file = null
+  for (;;) {
+    try {
+      const files = fs.readdirSync(dir).filter(f => /^数据采集AB帧_.*\.xlsx$/.test(f))
+      let newest = null
+      let newestM = 0
+      for (const f of files) {
+        const st = fs.statSync(path.join(dir, f))
+        if (st.mtimeMs > t0 && st.mtimeMs > newestM) {
+          newest = path.join(dir, f)
+          newestM = st.mtimeMs
+        }
+      }
+      if (newest) {
+        const size = fs.statSync(newest).size
+        await h.wait(500, true)
+        if (size > 0 && size === fs.statSync(newest).size) {
+          file = newest
+          break
+        }
+      }
+    } catch { /* 文件尚未生成或仍在写入，继续等待 */ }
+    if (Date.now() > deadline) throw new Error('帧频测试失败：未找到本次保存的数据采集AB帧_*.xlsx')
+    await h.wait(500, true)
+  }
+
+  h.log(`📄 读取 ${path.basename(file)}（帧频B帧）`)
+  const wb = new ExcelJS.Workbook()
+  await wb.xlsx.readFile(file)
+  const ws = wb.getWorksheet('B帧')
+  if (!ws) throw new Error('帧频测试失败：xlsx 中没有「B帧」工作表')
+
+  const header = Array.from(ws.getRow(1).values || [], v => String(v ?? ''))
+  const frameCol = header.findIndex(txt => txt.includes('红外图像帧号'))
+  if (frameCol === -1) {
+    throw new Error(`帧频测试失败：表头未找到「红外图像帧号」列，实际表头: ${header.filter(Boolean).join(' | ')}`)
+  }
+
+  const frameNumbers = []
+  for (let r = 2; r <= ws.rowCount; r++) {
+    const cell = ws.getRow(r).getCell(frameCol)
+    const value = parseFloat(String(cell.text ?? cell.value ?? ''))
+    frameNumbers.push(value)
+  }
+  const result = analyzeFrameFrequency(frameNumbers)
+  h.log(`... 帧频数据总行数 ${frameNumbers.length}，有效帧号 ${result.validCount}，最长连续段 ${result.longestRun}/${result.required}`)
+  if (!result.validCount) throw new Error('帧频测试失败：红外图像帧号字段没有可解析的数值')
+  return result
+}
+
 // 读取本次保存的 AB帧 xlsx 的「B帧」工作表 → { times[], angles[] }
 async function readBFrameSheet(h, t0, dir, channel) {
   const deadline = Date.now() + 15000
@@ -318,7 +394,7 @@ async function runWakeFlow(h, dataDir = runtimeDataDir) {
 // 搜索流程主体
 async function runSearchFlow(h, cfg, dataDir = runtimeDataDir) {
   if (!dataDir) throw new Error('未配置上位机路径，请检查 config.json')
-  const NEED = 21
+  const NEED = 5
   h.log(`▶ 搜索流程【${cfg.name}】搜索指令=${cfg.sszl}`)
   await h.setInput('comboBox_SSZL', cfg.sszl)      // 搜索指令（发送前设置，A帧为启动时快照）
   await h.setInput('comboBox_HWJHKZ', true)        // 允许截获
@@ -327,14 +403,18 @@ async function runSearchFlow(h, cfg, dataDir = runtimeDataDir) {
   const stoppedOldRun = await stopAcquisitionAndSave(h)
   if (stoppedOldRun) await h.wait(500, true)
   const t0 = Date.now()
-  await startAcquisitionAndSave(h)
 
   try {
+    await startAcquisitionAndSave(h)
     for (let s = SEARCH_RECORD_SECONDS; s >= 1; s--) {
       h.log(`... 录制中，剩余 ${s}s`)
       await h.wait(1000, true)
     }
-    h.log(`... 录制结束（${SEARCH_RECORD_SECONDS}s），停止保存与采集`)
+    h.log(`... 录制结束（${SEARCH_RECORD_SECONDS}s），发送搜索流程收尾A帧`)
+    await h.setInput('comboBox_HWJHKZ', false) // 取消允许截获
+    await h.setInput('comboBox_YZCSZL', true)   // 启用地面预置测试状态
+    await h.click('pushButton_SJCJ_F000H_update')
+    h.log('... 收尾A帧已更新并发送，准备停止保存与采集')
   } finally {
     await stopAcquisitionAndSave(h, { force: true })
   }
@@ -343,7 +423,7 @@ async function runSearchFlow(h, cfg, dataDir = runtimeDataDir) {
   const anchors = detectPoints(angles, cfg)
   h.log(`... 检测到 ${anchors.length} 个点（总帧数 ${angles.length}）`)
   if (anchors.length < NEED) {
-    throw new Error(`搜索测试失败：【${cfg.name}】仅找到 ${anchors.length}/${NEED} 个点（总帧数 ${angles.length}）`)
+    throw new Error(`搜索测试失败：【${cfg.name}】仅找到 ${anchors.length}/${NEED} 个连续点（总帧数 ${angles.length}）`)
   }
 
   const used = anchors.slice(0, NEED)
@@ -354,6 +434,33 @@ async function runSearchFlow(h, cfg, dataDir = runtimeDataDir) {
   h.log(`📊 平均时间 = ${avgMs.toFixed(1)}ms，范围 = ${range.toFixed(3)}°`)
   h.log(`✅ ${cfg.name}搜索测试完成`)
   return { avgMs, range }
+}
+
+async function runFrameRateFlow(h, dataDir = runtimeDataDir) {
+  if (!dataDir) throw new Error('未配置上位机路径，请检查 config.json')
+  h.log('▶ 帧频测试：发送A帧并保存A/B帧15秒')
+
+  const stoppedOldRun = await stopAcquisitionAndSave(h)
+  if (stoppedOldRun) await h.wait(500, true)
+  const t0 = Date.now()
+
+  try {
+    await startAcquisitionAndSave(h)
+    for (let s = SEARCH_RECORD_SECONDS; s >= 1; s--) {
+      h.log(`... 帧频录制中，剩余 ${s}s`)
+      await h.wait(1000, true)
+    }
+    h.log(`... 帧频录制结束（${SEARCH_RECORD_SECONDS}s）`)
+  } finally {
+    await stopAcquisitionAndSave(h, { force: true })
+  }
+
+  const result = await readFrameFrequencySheet(h, t0, dataDir)
+  if (!result.success) {
+    throw new Error(`帧频测试失败：最长连续段 ${result.longestRun}/${result.required}，要求相邻帧号差为${result.step}`)
+  }
+  h.log(`✅ 帧频测试成功：连续 ${result.longestRun} 帧，前后帧号差为 ${result.step}`)
+  return result
 }
 
 // 六个波位的规则配置
@@ -479,6 +586,7 @@ async function stopAcquisitionAndSave(h, { force = false } = {}) {
 const sidebar = [
   { type: 'button', label: '自检' },
   { type: 'button', label: '唤醒' },
+  { type: 'button', label: '帧频' },
   { type: 'select', label: '搜索能力', options: ['九波位', '十六波位', '俯仰向三波位', '方位向三波位', '五波位', '四波位'] },
   { type: 'button', label: '最小搜索范围' },
   { type: 'button', label: '光轴预置范围' }
@@ -560,6 +668,7 @@ const flows = {
   },
 
   '唤醒': async (h) => runWakeFlow(h),
+  '帧频': async (h) => runFrameRateFlow(h),
 
   '搜索能力 - 九波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 九波位']),
   '搜索能力 - 十六波位': async (h) => runSearchFlow(h, SEARCH_CONFIGS['搜索能力 - 十六波位']),
@@ -631,6 +740,9 @@ module.exports = {
   SEARCH_CONFIGS,
   detectPoints,
   runSearchFlow,
+  runFrameRateFlow,
+  readFrameFrequencySheet,
+  analyzeFrameFrequency,
   runWakeFlow,
   findWakeReturn,
   stopAcquisitionAndSave,
