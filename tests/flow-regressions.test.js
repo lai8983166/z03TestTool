@@ -19,9 +19,10 @@ const {
 test('nine- and sixteen-position points require the immediate next frame to rise above 1', () => {
   for (const key of ['搜索能力 - 九波位', '搜索能力 - 十六波位']) {
     const cfg = SEARCH_CONFIGS[key]
-    assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 0, 0, 0, 1.01], cfg), [8], key)
-    assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 0, 0, 0, 1], cfg), [], key)
-    assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 0, 0, 0, 0.9, 1.2], cfg), [], `${key} must use the immediate next frame`)
+    assert.equal(cfg.n, 5, `${key} must use five continuous frames`)
+    assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 1.01], cfg), [5], key)
+    assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 1], cfg), [], key)
+    assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 0.9, 1.2], cfg), [], `${key} must use the immediate next frame`)
   }
 })
 

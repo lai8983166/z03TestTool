@@ -358,8 +358,8 @@ async function runSearchFlow(h, cfg, dataDir = runtimeDataDir) {
 
 // 六个波位的规则配置
 const SEARCH_CONFIGS = {
-  '搜索能力 - 九波位':      { name: '九波位', sszl: '001b九位波搜索', channel: '方位角', n: 8, lo: -0.3, hi: 0.3, nextGreaterThan: 1 },
-  '搜索能力 - 十六波位':    { name: '十六波位', sszl: '010b十六位波搜索', channel: '方位角', n: 8, lo: -0.3, hi: 0.3, nextGreaterThan: 1 },
+  '搜索能力 - 九波位':      { name: '九波位', sszl: '001b九位波搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, nextGreaterThan: 1 },
+  '搜索能力 - 十六波位':    { name: '十六波位', sszl: '010b十六位波搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, nextGreaterThan: 1 },
   '搜索能力 - 俯仰向三波位': { name: '俯仰向三波位', sszl: '011b俯仰向三波位搜索', channel: '俯仰角', n: 5, lo: -0.5, hi: 0.5, target: -2 },
   '搜索能力 - 方位向三波位': { name: '方位向三波位', sszl: '100b方位向三波位搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, target: -3 },
   '搜索能力 - 五波位':      { name: '五波位', sszl: '101b五波位搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, target: -1 },
