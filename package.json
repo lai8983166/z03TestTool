@@ -2,12 +2,44 @@
   "name": "z03testtool",
   "version": "1.0.0",
   "description": "Z03 test tool",
+  "author": "Z03testTool",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "test": "node --test tests/*.test.js",
+    "dist": "electron-builder --win portable && copy /Y config.json release\\config.json",
+    "prepare:offline": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-offline.ps1",
+    "dist:offline": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-offline.ps1"
+  },
+  "build": {
+    "appId": "com.z03.testtool",
+    "productName": "Z03testTool",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "flow.js",
+      "preload.js",
+      "panel.html",
+      "panel.js",
+      "config.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "Z03testTool-Portable.exe"
+    }
   },
   "devDependencies": {
-    "electron": "^34.5.8"
+    "electron": "^34.5.8",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "exceljs": "^4.4.0"

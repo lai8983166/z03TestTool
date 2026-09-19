@@ -1,0 +1,37 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+context: |
+  术语约定：被自动化的外部 Web 工具统称「上位机服务」，禁止以目录名"7-31"称呼它（部署目录不固定）。
+  架构：Z03testTool（Electron）通过隐藏窗口驱动上位机服务页面（http://localhost:8080，手动经 start.bat 启动），
+  流程硬编码于 flow.js 的 flows 注册表；上位机服务的元素 id 与数据产物（data/ 下 xlsx 等）是稳定契约，
+  不改动上位机服务代码。
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
