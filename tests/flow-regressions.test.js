@@ -16,17 +16,40 @@ const {
   detectPoints,
   analyzeFrameFrequency,
   readFrameFrequencySheet,
-  runFrameRateFlow
+  runFrameRateFlow,
+  makeAutomationRecordingName
 } = require('../flow')
 
-test('nine- and sixteen-position points require the immediate next frame to rise above 1', () => {
-  for (const key of ['搜索能力 - 九波位', '搜索能力 - 十六波位']) {
-    const cfg = SEARCH_CONFIGS[key]
-    assert.equal(cfg.n, 5, `${key} must use five continuous frames`)
-    assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 1.01], cfg), [5], key)
-    assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 1], cfg), [], key)
-    assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 0.9, 1.2], cfg), [], `${key} must use the immediate next frame`)
-  }
+test('automation recording filenames include the flow name and remain Windows-safe', () => {
+  const name = makeAutomationRecordingName('搜索能力:十六波位', new Date('2026-01-02T03:04:05.000Z'))
+  assert.match(name, /^数据采集AB帧_搜索能力_十六波位_2026-01-02T03-04-05-000Z\.xlsx$/)
+})
+
+test('nine- and sixteen-position points use five frames and require the immediate next frame to rise above 1', () => {
+  const nine = SEARCH_CONFIGS['搜索能力 - 九波位']
+  assert.equal(nine.n, 5)
+  assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 1.01], nine), [5])
+  assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 1], nine), [])
+
+  const sixteen = SEARCH_CONFIGS['搜索能力 - 十六波位']
+  assert.equal(sixteen.n, 5)
+  assert.equal(sixteen.requiredPoints, 11)
+  assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 1.01], sixteen), [5])
+  assert.deepEqual(detectPoints([0, 0, 0, 0, 1.01], sixteen), [])
+  assert.deepEqual(detectPoints([0, 0, 0, 0, 0, 0.9, 1.2], sixteen), [], 'must use the immediate next frame')
+})
+
+test('three-position search rules use the updated pitch range and azimuth falling threshold', () => {
+  const pitch = SEARCH_CONFIGS['搜索能力 - 俯仰向三波位']
+  assert.equal(pitch.n, 5)
+  assert.equal(pitch.exclusiveRange, true)
+  assert.deepEqual(detectPoints([0, 0, 0, 0, 0, -2], pitch), [5])
+  assert.deepEqual(detectPoints([0.8, 0, 0, 0, 0, -2], pitch), [])
+  assert.deepEqual(detectPoints([-0.8, 0, 0, 0, 0, -2], pitch), [])
+
+  const azimuth = SEARCH_CONFIGS['搜索能力 - 方位向三波位']
+  assert.deepEqual(detectPoints([0, 0, 0, 0, 0, -1.01], azimuth), [5])
+  assert.deepEqual(detectPoints([0, 0, 0, 0, 0, -1], azimuth), [])
 })
 
 test('frame-frequency analysis requires 1000 records with adjacent frame-number difference 2', () => {
@@ -133,6 +156,7 @@ test('wake records before command and uses the first B-frame return from outside
     const result = await runWakeFlow(h, tempDir)
     assert.equal(result.elapsedMs, 620)
     assert.deepEqual(result.channels, ['俯仰角'])
+    assert.equal(fs.readdirSync(tempDir).filter((file) => file.includes('唤醒')).length, 1)
     assert.ok(actions.indexOf('set:comboBox_YZCSZL=true') < actions.indexOf('click:pushButton_SJCJ_F000H_Send'))
     assert.ok(actions.indexOf('click:pushButton_SJCJ_0010H') < actions.indexOf('click:pushButton_Wake'))
   } finally {
@@ -223,6 +247,7 @@ test('search resets stale toggle states and records for 15 seconds', async () =>
     assert.ok(actions.indexOf('set:comboBox_HWJHKZ=false') < finalUpdate)
     assert.ok(actions.indexOf('set:comboBox_YZCSZL=true') < finalUpdate)
     assert.ok(finalUpdate < finalSaveStop)
+    assert.equal(fs.readdirSync(tempDir).filter((file) => file.includes('搜索能力-测试波位')).length, 1)
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true })
   }
@@ -296,6 +321,7 @@ test('frame-rate flow records for 15 seconds and succeeds on 1000 adjacent frame
     assert.equal(result.success, true)
     assert.equal(result.longestRun, 1000)
     assert.equal(waits.filter((ms) => ms === 1000).length, 15)
+    assert.equal(fs.readdirSync(tempDir).filter((file) => file.includes('帧频')).length, 1)
     assert.deepEqual(actions.filter((action) => action.startsWith('click:')), [
       'click:pushButton_SJCJ_F000H_Send',
       'click:pushButton_SJCJ_0010H',

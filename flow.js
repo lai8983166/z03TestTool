@@ -125,10 +125,15 @@ function detectPoints(angles, cfg) {
   let run = 0
   for (let i = 0; i < angles.length; i++) {
     const v = angles[i]
-    if (Number.isFinite(v) && v >= cfg.lo && v <= cfg.hi) { run++; continue }
+    const inRange = cfg.exclusiveRange
+      ? Number.isFinite(v) && v > cfg.lo && v < cfg.hi
+      : Number.isFinite(v) && v >= cfg.lo && v <= cfg.hi
+    if (inRange) { run++; continue }
     const nextMatches = cfg.nextGreaterThan !== undefined
       ? Number.isFinite(v) && v > cfg.nextGreaterThan
-      : Number.isFinite(v) && Math.round(v) === cfg.target
+      : cfg.nextLessThan !== undefined
+        ? Number.isFinite(v) && v < cfg.nextLessThan
+        : Number.isFinite(v) && Math.round(v) === cfg.target
     if (run >= cfg.n && nextMatches) anchors.push(i)
     run = 0
   }
@@ -209,6 +214,52 @@ async function readFrameFrequencySheet(h, t0, dir) {
   h.log(`... 帧频数据总行数 ${frameNumbers.length}，有效帧号 ${result.validCount}，最长连续段 ${result.longestRun}/${result.required}`)
   if (!result.validCount) throw new Error('帧频测试失败：红外图像帧号字段没有可解析的数值')
   return result
+}
+
+function makeAutomationRecordingName(flowName, timestamp = new Date()) {
+  const safeName = String(flowName || '自动化流程')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .trim() || '自动化流程'
+  const stamp = timestamp.toISOString().replace(/[:.]/g, '-')
+  return `数据采集AB帧_${safeName}_${stamp}.xlsx`
+}
+
+async function renameLatestRecordingFile(h, t0, dir, flowName) {
+  const deadline = Date.now() + 15000
+  const wait = h.waitCleanup ? (ms) => h.waitCleanup(ms) : (ms) => h.wait(ms, true)
+  let source = null
+
+  for (;;) {
+    try {
+      const files = fs.readdirSync(dir).filter(f => /^数据采集AB帧_.*\.xlsx$/.test(f))
+      let newestM = 0
+      for (const f of files) {
+        const candidate = path.join(dir, f)
+        const st = fs.statSync(candidate)
+        if (st.mtimeMs > t0 && st.mtimeMs > newestM) {
+          source = candidate
+          newestM = st.mtimeMs
+        }
+      }
+      if (source) {
+        const size = fs.statSync(source).size
+        await wait(500)
+        if (size > 0 && size === fs.statSync(source).size) break
+      }
+    } catch { /* 文件尚未生成或仍在写入，继续等待 */ }
+    if (Date.now() > deadline) throw new Error(`自动化流程【${flowName}】未找到本次保存的A/B帧文件`)
+    await wait(500)
+  }
+
+  const baseName = makeAutomationRecordingName(flowName)
+  let target = path.join(dir, baseName)
+  let suffix = 1
+  while (fs.existsSync(target)) {
+    target = path.join(dir, baseName.replace(/\.xlsx$/, `_${suffix++}.xlsx`))
+  }
+  fs.renameSync(source, target)
+  h.log(`📁 自动化流程【${flowName}】数据已命名为 ${path.basename(target)}`)
+  return target
 }
 
 // 读取本次保存的 AB帧 xlsx 的「B帧」工作表 → { times[], angles[] }
@@ -360,10 +411,12 @@ async function runWakeFlow(h, dataDir = runtimeDataDir) {
   await stopAcquisitionAndSave(h)
   await h.setInput('comboBox_YZCSZL', true)
   const recordingStart = Date.now()
-  await startAcquisitionAndSave(h)
+  let recordingStarted = false
 
   let wakeTime
   try {
+    await startAcquisitionAndSave(h)
+    recordingStarted = true
     await h.wait(100, true) // 预录少量B帧，用于确认角度在唤醒前/初期确实位于 ±1° 外
     wakeTime = Date.now()
     await h.click('pushButton_Wake')
@@ -371,6 +424,7 @@ async function runWakeFlow(h, dataDir = runtimeDataDir) {
     await h.wait(RECORD_MS, true)
   } finally {
     await stopAcquisitionAndSave(h, { force: true })
+    if (recordingStarted) await renameLatestRecordingFile(h, recordingStart, dataDir, '唤醒')
   }
 
   const frames = await readWakeBFrameSheet(h, recordingStart, dataDir)
@@ -394,7 +448,7 @@ async function runWakeFlow(h, dataDir = runtimeDataDir) {
 // 搜索流程主体
 async function runSearchFlow(h, cfg, dataDir = runtimeDataDir) {
   if (!dataDir) throw new Error('未配置上位机路径，请检查 config.json')
-  const NEED = 5
+  const NEED = cfg.requiredPoints ?? 5
   h.log(`▶ 搜索流程【${cfg.name}】搜索指令=${cfg.sszl}`)
   await h.setInput('comboBox_SSZL', cfg.sszl)      // 搜索指令（发送前设置，A帧为启动时快照）
   await h.setInput('comboBox_HWJHKZ', true)        // 允许截获
@@ -403,9 +457,11 @@ async function runSearchFlow(h, cfg, dataDir = runtimeDataDir) {
   const stoppedOldRun = await stopAcquisitionAndSave(h)
   if (stoppedOldRun) await h.wait(500, true)
   const t0 = Date.now()
+  let recordingStarted = false
 
   try {
     await startAcquisitionAndSave(h)
+    recordingStarted = true
     for (let s = SEARCH_RECORD_SECONDS; s >= 1; s--) {
       h.log(`... 录制中，剩余 ${s}s`)
       await h.wait(1000, true)
@@ -417,6 +473,7 @@ async function runSearchFlow(h, cfg, dataDir = runtimeDataDir) {
     h.log('... 收尾A帧已更新并发送，准备停止保存与采集')
   } finally {
     await stopAcquisitionAndSave(h, { force: true })
+    if (recordingStarted) await renameLatestRecordingFile(h, t0, dataDir, `搜索能力-${cfg.name}`)
   }
 
   const { times, angles } = await readBFrameSheet(h, t0, dataDir, cfg.channel)
@@ -443,9 +500,11 @@ async function runFrameRateFlow(h, dataDir = runtimeDataDir) {
   const stoppedOldRun = await stopAcquisitionAndSave(h)
   if (stoppedOldRun) await h.wait(500, true)
   const t0 = Date.now()
+  let recordingStarted = false
 
   try {
     await startAcquisitionAndSave(h)
+    recordingStarted = true
     for (let s = SEARCH_RECORD_SECONDS; s >= 1; s--) {
       h.log(`... 帧频录制中，剩余 ${s}s`)
       await h.wait(1000, true)
@@ -453,6 +512,7 @@ async function runFrameRateFlow(h, dataDir = runtimeDataDir) {
     h.log(`... 帧频录制结束（${SEARCH_RECORD_SECONDS}s）`)
   } finally {
     await stopAcquisitionAndSave(h, { force: true })
+    if (recordingStarted) await renameLatestRecordingFile(h, t0, dataDir, '帧频')
   }
 
   const result = await readFrameFrequencySheet(h, t0, dataDir)
@@ -466,9 +526,9 @@ async function runFrameRateFlow(h, dataDir = runtimeDataDir) {
 // 六个波位的规则配置
 const SEARCH_CONFIGS = {
   '搜索能力 - 九波位':      { name: '九波位', sszl: '001b九位波搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, nextGreaterThan: 1 },
-  '搜索能力 - 十六波位':    { name: '十六波位', sszl: '010b十六位波搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, nextGreaterThan: 1 },
-  '搜索能力 - 俯仰向三波位': { name: '俯仰向三波位', sszl: '011b俯仰向三波位搜索', channel: '俯仰角', n: 5, lo: -0.5, hi: 0.5, target: -2 },
-  '搜索能力 - 方位向三波位': { name: '方位向三波位', sszl: '100b方位向三波位搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, target: -3 },
+  '搜索能力 - 十六波位':    { name: '十六波位', sszl: '010b十六位波搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, nextGreaterThan: 1, requiredPoints: 11 },
+  '搜索能力 - 俯仰向三波位': { name: '俯仰向三波位', sszl: '011b俯仰向三波位搜索', channel: '俯仰角', n: 5, lo: -0.8, hi: 0.8, exclusiveRange: true, target: -2 },
+  '搜索能力 - 方位向三波位': { name: '方位向三波位', sszl: '100b方位向三波位搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, nextLessThan: -1 },
   '搜索能力 - 五波位':      { name: '五波位', sszl: '101b五波位搜索', channel: '方位角', n: 5, lo: -0.3, hi: 0.3, target: -1 },
   '搜索能力 - 四波位':      { name: '四波位', sszl: '110b四波位搜索', channel: '方位角', rule: 'signFlip' }
 }
@@ -685,8 +745,11 @@ const flows = {
     await assertTurntableReady(h)
     await h.setInput('comboBox_HWJHKZ', true)
     await stopAcquisitionAndSave(h)
-    await startAcquisitionAndSave(h)
+    const recordingStart = Date.now()
+    let recordingStarted = false
     try {
+      await startAcquisitionAndSave(h)
+      recordingStarted = true
       await h.wait(5000, true)
       h.log('... 预录 5s 结束，开始点位扫描')
       await scanPositions(h)
@@ -696,6 +759,7 @@ const flows = {
     } finally {
       await h.click('tt_btn_stop', { force: true })
       await stopAcquisitionAndSave(h, { force: true })
+      if (recordingStarted && runtimeDataDir) await renameLatestRecordingFile(h, recordingStart, runtimeDataDir, '最小搜索范围')
     }
     h.log('✅ 最小搜索范围流程完成')
   },
@@ -709,8 +773,11 @@ const flows = {
     await assertTurntableReady(h)
     await h.setInput('comboBox_YZCSZL', true)      // 地面预置测试状态
     await stopAcquisitionAndSave(h)
-    await startAcquisitionAndSave(h)
+    const recordingStart = Date.now()
+    let recordingStarted = false
     try {
+      await startAcquisitionAndSave(h)
+      recordingStarted = true
       await h.wait(5000, true)
       h.log('... 预录 5s 结束，开始点位扫描')
       await scanPositions(h, async ({ innerOffset, outerOffset }) => {
@@ -727,6 +794,7 @@ const flows = {
     } finally {
       await h.click('tt_btn_stop', { force: true })
       await stopAcquisitionAndSave(h, { force: true })
+      if (recordingStarted && runtimeDataDir) await renameLatestRecordingFile(h, recordingStart, runtimeDataDir, '光轴预置范围')
     }
     h.log('✅ 光轴预置范围流程完成')
   }
@@ -743,6 +811,8 @@ module.exports = {
   runFrameRateFlow,
   readFrameFrequencySheet,
   analyzeFrameFrequency,
+  makeAutomationRecordingName,
+  renameLatestRecordingFile,
   runWakeFlow,
   findWakeReturn,
   stopAcquisitionAndSave,

@@ -21,6 +21,11 @@
 
 ## Impact
 
+### Additional scope
+
+- 自动化流程保存的 A/B 帧表格在保存完成后按流程名称和时间戳命名，并保证文件名符合 Windows 文件名规则。
+- `flow.js` 和回归测试覆盖自动化文件命名、非法字符替换及重名处理。
+
 - `flow.js`：新增帧频流程、xlsx 帧号读取/连续性分析、搜索流程收尾动作和侧边栏入口。
 - `tests/flow-regressions.test.js`：新增帧频分析及搜索流程收尾顺序测试。
 - `openspec/changes/...`：新增行为规格、设计和任务记录。
